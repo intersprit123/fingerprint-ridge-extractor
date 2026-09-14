@@ -7,4 +7,6 @@ __pycache__/
 *.jpeg
 *.png
 *.webp
+api_outputs/
+discord_bot/usage.json
 .DS_Store
