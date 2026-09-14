@@ -8,13 +8,13 @@ The project has two deliberately isolated tracks:
 
 ### 🟢 Realistic track — source of truth
 
-`Original → Gemini guidance → OpenCV → realistic PNG`
+`Original → Gemini Vision guidance → OpenCV → realistic PNG`
 
-Gemini may recommend crop/zoom and preprocessing. OpenCV performs the actual segmentation, normalization, ridge filtering, border removal, and final rendering. No AI-generated pixels are merged into the realistic result.
+Gemini is the visual-analysis specialist: finger visibility, background contamination, blur, ridge visibility, and zoom guidance. OpenCV performs the actual segmentation, normalization, ridge filtering, border removal, and final rendering. No AI-generated pixels are merged into the realistic result.
 
 ### 🟠 Prediction + Reality track — experimental only
 
-`Realistic PNG → Qwen Vision → prediction/reasoning → Hugging Face review`
+`Realistic PNG → Qwen Vision through Hugging Face → prediction/reasoning + review`
 
 This branch is never allowed to overwrite the realistic PNG. Predictions are clearly labeled as hypotheses and are not treated as authentic fingerprint detail.
 
@@ -29,36 +29,11 @@ The processor does not synthesize missing biometric detail.
 
 ## AI providers
 
-- **Gemini**: first visual/preprocessing analysis.
-- **OpenAI**: optional premium visual review. The OpenAI Responses API supports image inputs. See the official API quickstart. 
-- **Qwen through Hugging Face Inference Providers**: separate prediction/reasoning and independent final review. Hugging Face provides an OpenAI-compatible VLM endpoint and supports models such as Qwen2.5-VL.
+- **Gemini**: the only AI used for the realistic visual-guidance stage.
+- **Qwen through Hugging Face Inference Providers**: optional separate prediction/reasoning and independent review.
+- **OpenAI Vision is not used by this project.**
 
-The provider layer records input/output/total token usage when the provider returns usage metadata. The Discord bot also keeps a local application-side ledger. That ledger is **not** a provider's remaining quota; provider quotas are controlled by the provider account.
-
-## Discord
-
-The bot supports:
-
-```text
-/fingerprint image:<attachment> prediction:<true|false>
-/usage
-```
-
-A successful request returns:
-
-- `fingerprint_ridges_final.png` — downloadable realistic result
-- `fingerprint_report.json` — quality, AI usage, and integrity metadata
-- Discord embed with provider/model usage and local ledger totals
-
-## HTTP API
-
-Run:
-
-```bash
-uvicorn api.server:app --host 0.0.0.0 --port 8000
-```
-
-Then POST an image to `/process` as multipart form data. The response contains `download`, `report`, quality metrics, usage, and integrity flags. `/health` provides a simple health check.
+The provider layer records input/output/total token usage when the provider returns usage metadata. The Discord bot keeps a local application-side ledger. That ledger is **not** a provider's remaining quota; provider quotas are controlled by the provider account.
 
 ## Configuration
 
@@ -67,23 +42,93 @@ Copy `.env.example` to `.env` and add your own secrets. Never commit `.env`, API
 ```env
 GEMINI_API_KEY=YOUR_GEMINI_KEY
 GEMINI_MODEL=gemini-2.5-flash
-OPENAI_API_KEY=YOUR_OPENAI_KEY
-OPENAI_MODEL=gpt-5.6-luna
-ENABLE_OPENAI_REVIEW=0
 HF_TOKEN=YOUR_HF_TOKEN
 HF_MODEL=Qwen/Qwen2.5-VL-32B-Instruct:fastest
 DISCORD_BOT_TOKEN=YOUR_DISCORD_BOT_TOKEN
+OUTPUT_DIR=./api_outputs
+MAX_IMAGE_BYTES=12582912
 ```
 
-## Run locally
+## Install
 
 ```bash
 python -m venv .venv
 # Windows: .venv\\Scripts\\activate
 # Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
+```
+
+## Streamlit
+
+```bash
 streamlit run app.py
 ```
+
+The UI provides a direct download button for the realistic PNG and, when the prediction branch is enabled, a downloadable JSON AI review report.
+
+## CLI
+
+```bash
+python cli.py photo.jpg --mode 2 --zoom 4
+```
+
+Outputs:
+
+```text
+outputs/fingerprint_ridges_realistic.png
+outputs/fingerprint_report.json
+```
+
+For the separate prediction/review branch:
+
+```bash
+python cli.py photo.jpg --prediction
+```
+
+## HTTP API
+
+Start the API:
+
+```bash
+uvicorn api.server:app --host 0.0.0.0 --port 8000
+```
+
+Then:
+
+```bash
+curl -X POST http://127.0.0.1:8000/process \
+  -F "image=@photo.jpg" \
+  -F "mode=2" \
+  -F "zoom_scale=4" \
+  -F "prediction=false"
+```
+
+The JSON response contains `download` and `report` URLs. Open the returned download URL to retrieve the PNG.
+
+## Discord
+
+The repository contains an optional Discord interface. It requires your own Discord application and bot token; no token is stored in GitHub.
+
+```bash
+python -m discord_bot.bot
+```
+
+Slash commands:
+
+```text
+/fingerprint image:<attachment> prediction:<true|false>
+/usage
+```
+
+A successful request returns the realistic PNG and JSON report as Discord attachments. `/usage` is local accounting only, not a provider remaining-quota value.
+
+## Downloads
+
+- **Source code:** use GitHub's Code → Download ZIP, or the main-branch ZIP URL.
+- **Streamlit result:** click the Download button.
+- **CLI result:** open the files in the `outputs/` directory.
+- **HTTP API result:** open the `download` URL returned by `/process`.
+- **Discord result:** download the PNG attachment from the bot response.
 
 ## Quality and limitations
 
