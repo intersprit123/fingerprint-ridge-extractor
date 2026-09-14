@@ -1,21 +1,19 @@
 # Fingerprint Ridge Extractor
 
-A small, local-first computer-vision tool for extracting **visible fingerprint ridge structure** from an authorized fingertip photograph.
+A local-first computer-vision tool for visualizing **visible fingerprint ridge structure** from close-up fingertip photographs that the operator is authorized to process.
 
-## What it does
+## V1 pipeline
 
-1. Accepts a fingertip image.
-2. Enhances local ridge/valley contrast with OpenCV.
-3. Segments visible ridge structure.
-4. Removes small isolated artifacts and image-edge artifacts.
-5. Produces a black-background image containing the extracted visible ridge structures.
-6. Optionally asks an OpenAI vision model for image-quality and preprocessing guidance.
+1. Upload JPG, JPEG, PNG, or WebP.
+2. Estimate the foreground/fingertip region automatically.
+3. Crop to a conservative interior of the detected region.
+4. Enhance local ridge/valley contrast with OpenCV.
+5. Segment visible ridge structure.
+6. Remove small artifacts and image-boundary noise.
+7. Produce a black-background, white-ridge PNG.
+8. Optionally use OpenAI for image-quality/preprocessing guidance.
 
-The OpenAI step is advisory. Pixel extraction remains deterministic and local so the system does not ask a generative model to invent biometric ridge detail.
-
-## Safety
-
-Use this project only with fingerprints you own or have explicit permission to process. It is intended for image processing and research/education, not for identifying people or bypassing biometric authentication.
+The OpenAI step is advisory. Pixel extraction remains local and deterministic so a generative model is not asked to invent missing biometric ridge detail.
 
 ## Run locally
 
@@ -27,17 +25,14 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-### Optional OpenAI setup
+## OpenAI configuration
 
-Set `OPENAI_API_KEY` in your environment or Streamlit secrets. Never commit the key.
+Set `OPENAI_API_KEY` in your environment or Streamlit secrets. Optionally set `OPENAI_MODEL` to the vision-capable model available to your OpenAI project. Never commit an API key or biometric images.
 
-The app uses an OpenAI vision-capable model through the Responses API for quality guidance; see the OpenAI model documentation for current model availability.
+## Limitations
 
-## Roadmap
+A normal phone photo may not contain enough information for reliable fingerprint capture. Enhancement cannot recover ridge information that was never recorded. Results are for visualization and image-processing experiments, not forensic identification or authentication.
 
-- Better automatic fingertip ROI detection
-- Finger orientation normalization
-- Ridge-frequency estimation
-- Quality scoring from local image features
-- Optional minutiae visualization for authorized research images
-- Automated regression tests using synthetic ridge patterns
+## Acceptable use
+
+Use only fingerprints you own or have explicit permission to process. This project intentionally does not implement person identification, fingerprint matching, authentication bypass, or identity inference.
