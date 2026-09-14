@@ -2,18 +2,45 @@
 
 A local-first computer-vision tool for visualizing **visible fingerprint ridge structure** from close-up fingertip photographs that the operator is authorized to process.
 
-## V1 pipeline
+## V2 pipeline
 
 1. Upload JPG, JPEG, PNG, or WebP.
-2. Estimate the foreground/fingertip region automatically.
-3. Crop to a conservative interior of the detected region.
-4. Enhance local ridge/valley contrast with OpenCV.
-5. Segment visible ridge structure.
-6. Remove small artifacts and image-boundary noise.
-7. Produce a black-background, white-ridge PNG.
-8. Optionally use **Google Gemini** for image-quality/preprocessing guidance.
+2. Build a conservative skin/finger foreground mask.
+3. Select **one visible finger** using area and centrality rather than processing the whole frame.
+4. Remove the rest of the background before ridge processing.
+5. Fill the isolated finger onto a **white background**, so unrelated objects, text/characters, and background texture are excluded from the ridge stage.
+6. Enhance local ridge/valley contrast with OpenCV.
+7. Extract only ridge structure already present in the image.
+8. Clean small disconnected artifacts and keep processing inside the finger mask.
+9. Produce a black-background, white-ridge PNG.
 
-The Gemini step is advisory. Pixel extraction remains local and deterministic so a generative model is not asked to invent missing biometric ridge detail.
+### Processing modes
+
+- **Mode 1 — Realistic:** conservative enhancement and adaptive thresholding, preserving more naturally visible ridge texture.
+- **Mode 2 — Realistic + Precision:** Mode 1 plus multi-angle Gabor frequency filtering to suppress background-like texture and strengthen existing ridge structure.
+
+The filtering is deterministic image processing. It does not synthesize missing biometric ridges.
+
+## Gemini guidance
+
+Optionally, Google Gemini analyzes the uploaded image only for preprocessing advice such as whether one finger is clearly visible, background contamination, blur, lighting, and which processing mode is likely to be more suitable. Gemini is **not** used to generate or reconstruct fingerprint ridges.
+
+Create a Gemini API key through Google's AI Studio and keep it outside Git:
+
+```bash
+export GEMINI_API_KEY="YOUR_KEY_HERE"
+```
+
+The default model is `gemini-2.5-flash`; override it with `GEMINI_MODEL` if needed.
+
+A local `.env` file is also supported:
+
+```env
+GEMINI_API_KEY=YOUR_KEY_HERE
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+`.env` is ignored by Git. Never commit API keys or biometric images.
 
 ## Run locally
 
@@ -25,21 +52,9 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Gemini configuration
-
-Create a Gemini API key through Google's AI Studio, then set `GEMINI_API_KEY` in your environment or Streamlit secrets. Optionally set `GEMINI_MODEL`; the default is `gemini-2.5-flash`. The app calls Gemini directly over HTTPS, so no OpenAI API key is required.
-
-Linux/macOS:
-
-```bash
-export GEMINI_API_KEY="YOUR_KEY_HERE"
-```
-
-Never commit an API key or biometric images.
-
 ## Limitations
 
-A normal phone photo may not contain enough information for reliable fingerprint capture. Enhancement cannot recover ridge information that was never recorded. Results are for visualization and image-processing experiments, not forensic identification or authentication.
+A normal phone photo may not contain enough information for reliable fingerprint capture. Enhancement cannot recover ridge information that was never recorded. Background removal is heuristic and can fail on unusual lighting, skin-like backgrounds, gloves, or multiple overlapping fingers. Results are for visualization and image-processing experiments, not forensic identification or authentication.
 
 ## Acceptable use
 
