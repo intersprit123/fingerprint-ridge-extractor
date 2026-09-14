@@ -12,13 +12,13 @@ import streamlit as st
 from PIL import Image
 from dotenv import load_dotenv
 
-from processor import analyze_quality, extract_ridges, make_preview
+from processor import analyze_quality, make_preview, process_pipeline
 
 load_dotenv()
 
 st.set_page_config(page_title="Fingerprint Ridge Extractor", page_icon="🖐️", layout="wide")
 st.title("🖐️ Fingerprint Ridge Extractor")
-st.caption("Single-finger isolation, automatic zoom, and visible ridge visualization for images you are authorized to process.")
+st.caption("Four-stage local image-processing pipeline for fingerprints you own or are authorized to process.")
 
 uploaded = st.file_uploader("Upload a fingertip photo", type=["jpg", "jpeg", "png", "webp"])
 mode = st.radio("Processing mode", ["Mode 1 — Realistic", "Mode 2 — Realistic + Precision"], horizontal=True)
@@ -42,7 +42,12 @@ def gemini_quality_guidance(image_bytes: bytes, mime_type: str) -> str:
         {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}},
     ]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             result = json.loads(response.read().decode("utf-8"))
@@ -63,7 +68,6 @@ def recommended_zoom(guidance: str | None, image: Image.Image) -> int:
         match = re.search(r"ZOOM\s*=\s*(2|4)x", guidance, flags=re.I)
         if match:
             return int(match.group(1))
-    # Conservative fallback: low-resolution images benefit more from the 4x processing canvas.
     return 4 if min(image.size) < 900 else 2
 
 
@@ -71,6 +75,7 @@ if uploaded:
     data = uploaded.getvalue()
     image = Image.open(io.BytesIO(data)).convert("RGB")
     image_array = np.array(image)
+
     left, right = st.columns(2)
     with left:
         st.subheader("Original")
@@ -81,45 +86,71 @@ if uploaded:
         st.metric("Local quality", f"{quality['score']:.0f}/100")
         st.write(f"**{quality['label']}** — sharpness {quality['sharpness']:.0f}, contrast {quality['contrast']:.1f}")
 
-    if st.button("Extract single-finger ridges", type="primary", use_container_width=True):
+    if st.button("Run 4-stage extraction", type="primary", use_container_width=True):
         guidance = None
         if use_gemini:
             try:
                 guidance = gemini_quality_guidance(data, uploaded.type or "image/jpeg")
             except Exception as exc:
                 st.warning(f"Gemini guidance unavailable; using local automatic zoom: {exc}")
+
         zoom_scale = recommended_zoom(guidance, image)
+        with st.spinner(f"Running Task 1 → Task 2 → Task 3 → Task 4 automatically at {zoom_scale}x…"):
+            pipeline = process_pipeline(image_array, mode=mode_number, zoom_scale=zoom_scale)
 
-        with st.spinner(f"Isolating one finger, removing background, auto-zooming {zoom_scale}x, and extracting visible ridge structure…"):
-            result, mask, zoomed, actual_scale = extract_ridges(image_array, mode=mode_number, zoom_scale=zoom_scale)
-            preview = make_preview(image_array, mask)
+        stage1 = pipeline["stage1"]
+        stage2 = pipeline["stage2"]
+        stage3 = pipeline["stage3"]
+        stage4 = pipeline["stage4"]
+        mask = pipeline["mask"]
+        actual_scale = pipeline["zoom_scale"]
+        preview = make_preview(image_array, mask)
 
-        st.success(f"Automatic finger zoom: {actual_scale}x — processing is performed on the isolated finger crop.")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.subheader(f"1. Isolated finger — {actual_scale}x zoom")
-            st.image(zoomed, use_container_width=True)
-            st.caption("Background is replaced by white before ridge processing. The upscale enlarges captured pixels; it does not invent missing ridge detail.")
-        with c2:
-            st.subheader(f"2. Ridge-only — {mode}")
-            st.image(result, use_container_width=True)
-            ok, encoded = cv2.imencode(".png", result)
+        st.success(f"All 4 tasks completed automatically — selected finger processed at {actual_scale}x.")
+
+        st.header("Pipeline results")
+        a, b = st.columns(2)
+        with a:
+            st.subheader("Task 1 — Background removed")
+            st.image(stage1, use_container_width=True)
+            st.caption("The automatically selected finger is kept; everything outside it is white.")
+        with b:
+            st.subheader("Task 2 — Extra marks removed")
+            st.image(stage2, use_container_width=True)
+            st.caption("Only ridge-like line evidence inside the selected finger is retained.")
+
+        c, d = st.columns(2)
+        with c:
+            st.subheader("Task 3 — Finger border removed")
+            st.image(stage3, use_container_width=True)
+            st.caption("The outer silhouette/border is removed using distance from the finger edge.")
+        with d:
+            st.subheader("Task 4 — Dark final representation")
+            st.image(stage4, use_container_width=True)
+            st.caption("Clean dark ridge lines on a white background. No synthetic ridge detail is added.")
+            ok, encoded = cv2.imencode(".png", stage4)
             if ok:
-                st.download_button("Download ridge PNG", encoded.tobytes(), "fingerprint_ridges.png", "image/png", use_container_width=True)
+                st.download_button(
+                    "Download final ridge PNG",
+                    encoded.tobytes(),
+                    "fingerprint_ridges_final.png",
+                    "image/png",
+                    use_container_width=True,
+                )
 
         d1, d2, d3 = st.columns(3)
         with d1:
-            st.metric("Ridge pixel coverage", f"{float(np.count_nonzero(result)) / result.size * 100:.1f}%")
+            st.metric("Final ridge coverage", f"{float(np.count_nonzero(stage4 < 128)) / stage4.size * 100:.1f}%")
         with d2:
             st.metric("Finger-mask coverage", f"{float(np.count_nonzero(mask)) / mask.size * 100:.1f}%")
         with d3:
-            st.metric("Auto zoom", f"{actual_scale}x")
+            st.metric("Automatic zoom", f"{actual_scale}x")
 
-        with st.expander("Show original-frame finger isolation"):
+        with st.expander("Original-frame finger isolation"):
             st.image(preview, use_container_width=True)
         if guidance:
-            st.subheader("Gemini preprocessing guidance")
-            st.code(guidance)
+            with st.expander("Gemini preprocessing guidance"):
+                st.code(guidance)
 else:
     st.info("Upload a photo to begin.")
 
