@@ -88,67 +88,104 @@ def auto_zoom(image: np.ndarray, mask: np.ndarray, scale: int = 2):
     zoomed = cv2.resize(crop, size, interpolation=cv2.INTER_LANCZOS4)
     zoomed_mask = cv2.resize(crop_mask, size, interpolation=cv2.INTER_NEAREST)
     blur = cv2.GaussianBlur(zoomed, (0, 0), 1.0)
-    zoomed = cv2.addWeighted(zoomed, 1.10, blur, -0.10, 0)
+    zoomed = cv2.addWeighted(zoomed, 1.12, blur, -0.12, 0)
     return zoomed, zoomed_mask, scale
 
 
 def _gabor_precision(gray: np.ndarray, mask: np.ndarray) -> np.ndarray:
     grayf = gray.astype(np.float32) / 255.0
     responses = []
-    # Fingerprint ridges are locally oriented and approximately periodic.
-    # A bank of moderately narrow filters suppresses camera/background texture.
     for theta in np.linspace(0, np.pi, 24, endpoint=False):
-        kernel = cv2.getGaborKernel(
-            (31, 31), 3.6, theta, 10.0, 0.52, 0, ktype=cv2.CV_32F
-        )
+        kernel = cv2.getGaborKernel((31, 31), 4.0, theta, 9.0, 0.55, 0, ktype=cv2.CV_32F)
         responses.append(np.abs(cv2.filter2D(grayf, cv2.CV_32F, kernel)))
     response = np.max(np.stack(responses, axis=0), axis=0)
-    response = cv2.GaussianBlur(response, (0, 0), 0.7)
     response = cv2.normalize(response, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     response[mask == 0] = 0
     return response
 
 
-def _ridge_core_mask(mask: np.ndarray) -> np.ndarray:
-    # Never trust the immediate finger boundary as ridge data. This is a
-    # major source of the white "snow" visible in poor extractions.
-    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
+def _ridge_core(mask: np.ndarray) -> np.ndarray:
+    # Remove the outer finger boundary and unreliable edge pixels.  Fingerprint
+    # ridges near the silhouette are especially easy to confuse with background texture.
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
     core = cv2.erode(mask, k, iterations=1)
-    # Remove tiny isolated mask islands as well.
-    n, labels, stats, _ = cv2.connectedComponentsWithStats(core, 8)
-    if n <= 1:
-        return core
-    largest = max(range(1, n), key=lambda i: stats[i, cv2.CC_STAT_AREA])
-    return np.where(labels == largest, 255, 0).astype(np.uint8)
+    # Fill tiny holes so the core remains a continuous usable ROI.
+    core = cv2.morphologyEx(core, cv2.MORPH_CLOSE,
+                            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11)), 2)
+    return core
 
 
 def _clean_ridges(ridges: np.ndarray, mask: np.ndarray, mode: int) -> np.ndarray:
     ridges = cv2.bitwise_and(ridges, mask)
-    # Closing repairs small breaks in genuine ridge strokes without turning
-    # isolated background specks into long structures.
-    close_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    ridges = cv2.morphologyEx(ridges, cv2.MORPH_CLOSE, close_k, iterations=1)
-
     n, labels, stats, _ = cv2.connectedComponentsWithStats(ridges, 8)
     clean = np.zeros_like(ridges)
-    area_floor = 18 if mode == 2 else 12
-    scale_floor = max(1, (ridges.shape[0] * ridges.shape[1]) // (110000 if mode == 2 else 150000))
-    min_area = max(area_floor, scale_floor)
+    min_area = max(12 if mode == 1 else 9,
+                   (ridges.shape[0] * ridges.shape[1]) // (150000 if mode == 1 else 180000))
     for i in range(1, n):
-        area = stats[i, cv2.CC_STAT_AREA]
-        ww = stats[i, cv2.CC_STAT_WIDTH]
-        hh = stats[i, cv2.CC_STAT_HEIGHT]
-        # Keep normal ridge fragments, but reject tiny compact speckles.
-        if area >= min_area and max(ww, hh) >= 5:
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
             clean[labels == i] = 255
-
+    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE,
+                             cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
     if mode == 1:
-        clean = cv2.morphologyEx(
-            clean, cv2.MORPH_OPEN,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
-        )
+        clean = cv2.morphologyEx(clean, cv2.MORPH_OPEN,
+                                 cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2)))
     clean[mask == 0] = 0
     return clean
+
+
+def _mode2_ridges(enhanced: np.ndarray, roi: np.ndarray) -> np.ndarray:
+    """Precision ridge extraction using dark-ridge enhancement + oriented evidence.
+
+    All output pixels originate from image evidence; this does not synthesize
+    fingerprint detail. The ROI is intentionally conservative to reject background.
+    """
+    # Black-hat is useful when ridges are darker than the surrounding skin.
+    blackhat = cv2.morphologyEx(
+        enhanced, cv2.MORPH_BLACKHAT,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+    )
+    blackhat = cv2.normalize(blackhat, None, 0, 255, cv2.NORM_MINMAX)
+
+    # A lightly normalized local contrast image gives adaptive thresholding a
+    # cleaner valley/ridge separation than raw intensity alone.
+    local = cv2.GaussianBlur(enhanced, (0, 0), 5.0)
+    normalized = cv2.divide(enhanced, np.maximum(local, 1), scale=255)
+    adaptive = cv2.adaptiveThreshold(
+        normalized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 31, 5
+    )
+
+    gabor = _gabor_precision(enhanced, roi)
+    vals = gabor[roi > 0]
+    if vals.size:
+        g58, g72 = np.percentile(vals, [58, 72])
+    else:
+        g58, g72 = 40, 65
+    g58, g72 = max(35, int(g58)), max(55, int(g72))
+
+    # Require evidence from the dark-ridge detector OR oriented Gabor response,
+    # but do not let a single noisy detector paint the whole image.
+    bh_vals = blackhat[roi > 0]
+    bh_thr = max(18, int(np.percentile(bh_vals, 68))) if bh_vals.size else 25
+    dark = (blackhat >= bh_thr).astype(np.uint8) * 255
+    oriented = (gabor >= g58).astype(np.uint8) * 255
+    strong_oriented = (gabor >= g72).astype(np.uint8) * 255
+
+    # Thin adaptive ridges survive only where there is nearby physical evidence.
+    support = cv2.dilate(cv2.bitwise_or(dark, oriented),
+                         cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    ridges = cv2.bitwise_and(adaptive, support)
+
+    # Strong oriented response can recover faint portions missed by adaptive
+    # thresholding, but only inside the conservative finger core.
+    ridges = cv2.bitwise_or(ridges, cv2.bitwise_and(strong_oriented, roi))
+
+    # Small closing reconnects broken ridge strokes without flooding valleys.
+    ridges = cv2.morphologyEx(
+        ridges, cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), 1
+    )
+    return cv2.bitwise_and(ridges, roi)
 
 
 def extract_ridges(image: np.ndarray, mode: int = 1, zoom_scale: int = 2):
@@ -158,61 +195,19 @@ def extract_ridges(image: np.ndarray, mode: int = 1, zoom_scale: int = 2):
     isolated = np.full_like(image, 255)
     isolated[finger_mask > 0] = image[finger_mask > 0]
     zoomed, zoomed_mask, actual_scale = auto_zoom(isolated, finger_mask, zoom_scale)
-
-    # Work only in the interior of the selected finger. Boundary pixels are
-    # where segmentation errors most often look like fake ridge fragments.
-    ridge_mask = _ridge_core_mask(zoomed_mask)
     gray = cv2.cvtColor(zoomed, cv2.COLOR_RGB2GRAY)
-    clahe = cv2.createCLAHE(
-        clipLimit=2.0 if mode == 1 else 2.3,
-        tileGridSize=(8, 8)
-    )
-    enhanced = clahe.apply(gray)
-    enhanced = cv2.GaussianBlur(enhanced, (3, 3), 0)
+    clahe = cv2.createCLAHE(clipLimit=2.2 if mode == 1 else 2.0, tileGridSize=(8, 8))
+    enhanced = cv2.GaussianBlur(clahe.apply(gray), (3, 3), 0)
 
     if mode == 1:
         ridges = cv2.adaptiveThreshold(
             enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY_INV, 31, 4
         )
+        ridge_mask = zoomed_mask
     else:
-        # Precision mode: Gabor is a real ridge-evidence detector, not a
-        # second hard binary mask. Adaptive threshold supplies the strokes;
-        # Gabor decides whether local texture looks ridge-like.
-        adaptive = cv2.adaptiveThreshold(
-            enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-            cv2.THRESH_BINARY_INV, 35, 5
-        )
-        gabor = _gabor_precision(enhanced, ridge_mask)
-        vals = gabor[ridge_mask > 0]
-        if vals.size:
-            p68 = float(np.percentile(vals, 68))
-            p84 = float(np.percentile(vals, 84))
-        else:
-            p68, p84 = 55.0, 75.0
-
-        # Require substantially more evidence than the old p58 threshold.
-        confidence = (gabor >= max(42, p68)).astype(np.uint8) * 255
-        strong = (gabor >= max(58, p84)).astype(np.uint8) * 255
-
-        # A 5x5 support region lets a real ridge survive a small local Gabor
-        # dip while still rejecting isolated texture specks.
-        support = cv2.dilate(
-            confidence,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        )
-        supported = cv2.bitwise_and(adaptive, support)
-        ridges = cv2.bitwise_or(
-            supported,
-            cv2.bitwise_and(strong, adaptive)
-        )
-
-        # Connect nearby pieces only when there is already ridge evidence.
-        bridge = cv2.dilate(
-            ridges,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        )
-        ridges = cv2.bitwise_or(ridges, cv2.bitwise_and(adaptive, bridge))
+        ridge_mask = _ridge_core(zoomed_mask)
+        ridges = _mode2_ridges(enhanced, ridge_mask)
 
     ridges = _clean_ridges(ridges, ridge_mask, mode)
     return ridges, finger_mask, zoomed, actual_scale
@@ -242,11 +237,4 @@ def process_fingerprint(path: str, mode: int = 1, zoom_scale: int = 2):
     ok, encoded = cv2.imencode(".png", result)
     if not ok:
         raise ValueError("Could not encode result")
-    return {
-        "image": result,
-        "isolated_finger": zoomed,
-        "png_bytes": encoded.tobytes(),
-        "ridge_coverage": float(np.count_nonzero(result)) / result.size * 100.0,
-        "region": region,
-        "zoom_scale": actual_scale,
-    }
+    return {"image": result, "isolated_finger": zoomed, "png_bytes": encoded.tobytes(), "ridge_coverage": float(np.count_nonzero(result)) / result.size * 100.0, "region": region, "zoom_scale": actual_scale}
