@@ -1,10 +1,8 @@
-import base64
+from __future__ import annotations
+
 import io
 import json
 import os
-import re
-import urllib.error
-import urllib.request
 
 import cv2
 import numpy as np
@@ -12,59 +10,26 @@ import streamlit as st
 from PIL import Image
 from dotenv import load_dotenv
 
+from ai_pipeline import run_ai_review_stack
 from processor import analyze_quality, make_preview, process_pipeline
 
 load_dotenv()
 
 st.set_page_config(page_title="Fingerprint Ridge Extractor", page_icon="🖐️", layout="wide")
 st.title("🖐️ Fingerprint Ridge Extractor")
-st.caption("Four-stage, detail-preserving ridge visualization for images you are authorized to process.")
+st.caption("Local-first, detail-preserving visualization with a strictly separated AI prediction branch.")
 
 uploaded = st.file_uploader("Upload a fingertip photo", type=["jpg", "jpeg", "png", "webp"])
-mode = st.radio("Processing mode", ["Mode 1 — Realistic", "Mode 2 — High Precision"], index=1, horizontal=True)
+mode = st.radio("Realistic processing", ["Mode 1 — Realistic", "Mode 2 — Realistic + Precision"], index=1, horizontal=True)
 mode_number = 1 if mode.startswith("Mode 1") else 2
-use_gemini = st.checkbox("Use Gemini for image-quality guidance + automatic zoom recommendation", value=True)
 
+c1, c2 = st.columns(2)
+with c1:
+    use_ai = st.checkbox("Run Gemini visual guidance", value=True)
+with c2:
+    prediction_branch = st.checkbox("Run separate Prediction + Reality review", value=False)
 
-def gemini_quality_guidance(image_bytes: bytes, mime_type: str) -> str:
-    api_key = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not configured")
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-    prompt = (
-        "Assess this image only for computer-vision preprocessing. Report whether one finger is clearly visible, "
-        "background contamination, blur, lighting, and recommend exactly 2x or 4x zoom. "
-        "Return the recommendation as ZOOM=2x or ZOOM=4x somewhere in the response. "
-        "Do not identify, name, or match any person and do not reconstruct missing biometric detail."
-    )
-    payload = {"contents": [{"parts": [
-        {"text": prompt},
-        {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}},
-    ]}]}
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Gemini API error {exc.code}: {detail[:500]}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Could not reach Gemini API: {exc.reason}") from exc
-    parts = result.get("candidates", [{}])[0].get("content", {}).get("parts", [])
-    text = "".join(part.get("text", "") for part in parts).strip()
-    if not text:
-        raise RuntimeError("Gemini returned no guidance text")
-    return text
-
-
-def recommended_zoom(guidance: str | None, image: Image.Image) -> int:
-    if guidance:
-        match = re.search(r"ZOOM\s*=\s*(2|4)x", guidance, flags=re.I)
-        if match:
-            return int(match.group(1))
-    return 4 if min(image.size) < 900 else 2
-
+st.info("🟢 Realistic output is never overwritten by the prediction branch. Prediction is advisory/experimental only.")
 
 if uploaded:
     data = uploaded.getvalue()
@@ -77,75 +42,86 @@ if uploaded:
         st.image(image, use_container_width=True)
     with right:
         quality = analyze_quality(image_array)
-        st.subheader("Image quality")
-        st.metric("Local quality", f"{quality['score']:.0f}/100")
-        st.write(f"**{quality['label']}** — sharpness {quality['sharpness']:.0f}, contrast {quality['contrast']:.1f}")
+        st.subheader("Local quality")
+        st.metric("Quality score", f"{quality['score']:.0f}/100")
+        st.write(f"**{quality['label']}** · sharpness {quality['sharpness']:.0f} · contrast {quality['contrast']:.1f}")
 
-    if st.button("Run high-quality 4-stage extraction", type="primary", use_container_width=True):
-        guidance = None
-        if use_gemini:
+    if st.button("Run professional extraction", type="primary", use_container_width=True):
+        zoom_scale = 4 if min(image.size) < 900 else 2
+        gemini_text = None
+        if use_ai:
             try:
-                guidance = gemini_quality_guidance(data, uploaded.type or "image/jpeg")
+                from ai_pipeline import gemini_vision, REALISTIC_PROMPT
+                guidance = gemini_vision(data, uploaded.type or "image/jpeg", REALISTIC_PROMPT)
+                gemini_text = guidance.text
+                if "ZOOM=4" in gemini_text.upper():
+                    zoom_scale = 4
+                elif "ZOOM=2" in gemini_text.upper():
+                    zoom_scale = 2
             except Exception as exc:
-                st.warning(f"Gemini guidance unavailable; using local automatic zoom: {exc}")
+                st.warning(f"Gemini guidance unavailable; local zoom selection used. {exc}")
 
-        zoom_scale = recommended_zoom(guidance, image)
-        with st.spinner(f"Analyzing → isolating → cleaning → border removal → final representation at {zoom_scale}x…"):
+        with st.spinner(f"Running deterministic CV pipeline at {zoom_scale}x…"):
             pipeline = process_pipeline(image_array, mode=mode_number, zoom_scale=zoom_scale)
 
-        stage1 = pipeline["stage1"]
-        stage2 = pipeline["stage2"]
-        stage3 = pipeline["stage3"]
-        stage4 = pipeline["stage4"]
-        mask = pipeline["mask"]
-        zoomed = pipeline["zoomed"]
-        actual_scale = pipeline["zoom_scale"]
+        stage1, stage2, stage3, stage4 = (pipeline[k] for k in ("stage1", "stage2", "stage3", "stage4"))
+        mask, zoomed, actual_scale = pipeline["mask"], pipeline["zoomed"], pipeline["zoom_scale"]
 
-        st.success(f"Completed automatically — Task 1 → Task 2 → Task 3 → Task 4 | {actual_scale}x")
-
-        st.header("High-quality processing pipeline")
+        st.success(f"Realistic pipeline complete · Task 1 → 2 → 3 → 4 · {actual_scale}x")
+        st.header("🟢 Realistic pipeline")
         a, b = st.columns(2)
         with a:
-            st.subheader("Task 1 — Clean white background")
+            st.subheader("Task 1 — Background removed")
             st.image(stage1, use_container_width=True)
-            st.caption("One automatically selected finger is isolated; everything else is white.")
+            st.caption("One visible finger is isolated and the rest of the frame is removed.")
         with b:
-            st.subheader("Task 2 — Keep real ridge structure")
+            st.subheader("Task 2 — Extra marks suppressed")
             st.image(stage2, use_container_width=True)
-            st.caption("Local contrast, dark-ridge enhancement and oriented evidence suppress unrelated marks and texture.")
-
+            st.caption("Ridge-like evidence is extracted with local normalization and oriented filtering.")
         c, d = st.columns(2)
         with c:
-            st.subheader("Task 3 — Remove finger border")
+            st.subheader("Task 3 — Finger border removed")
             st.image(stage3, use_container_width=True)
-            st.caption("The silhouette is excluded while the interior ridge field is retained.")
         with d:
-            st.subheader("Task 4 — Final dark representation")
+            st.subheader("Task 4 — Final dark ridge representation")
             st.image(stage4, use_container_width=True)
-            st.caption("Clean dark lines on white, derived from captured image pixels rather than generated biometric detail.")
 
-        st.header("Final result")
-        st.image(stage4, use_container_width=True)
+        st.header("📥 Download realistic result")
         ok, encoded = cv2.imencode(".png", stage4)
         if ok:
-            st.download_button("Download final ridge PNG", encoded.tobytes(), "fingerprint_ridges_final.png", "image/png", use_container_width=True)
+            st.download_button("Download fingerprint_ridges_realistic.png", encoded.tobytes(), "fingerprint_ridges_realistic.png", "image/png", use_container_width=True)
 
-        d1, d2, d3 = st.columns(3)
-        with d1:
-            st.metric("Final ridge coverage", f"{float(np.count_nonzero(stage4 < 128)) / stage4.size * 100:.1f}%")
-        with d2:
-            st.metric("Finger-mask coverage", f"{float(np.count_nonzero(mask)) / mask.size * 100:.1f}%")
-        with d3:
-            st.metric("Automatic zoom", f"{actual_scale}x")
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Ridge coverage", f"{np.count_nonzero(stage4 < 128) / stage4.size * 100:.1f}%")
+        m2.metric("Finger-mask coverage", f"{np.count_nonzero(mask) / mask.size * 100:.1f}%")
+        m3.metric("Automatic zoom", f"{actual_scale}x")
 
-        with st.expander("Show enlarged selected finger"):
+        with st.expander("Selected finger / enlarged source"):
             st.image(zoomed, use_container_width=True)
-        with st.expander("Show original-frame isolation"):
+        with st.expander("Original-frame isolation"):
             st.image(make_preview(image_array, mask), use_container_width=True)
-        if guidance:
-            with st.expander("Gemini preprocessing guidance"):
-                st.code(guidance)
+        if gemini_text:
+            with st.expander("Gemini visual guidance"):
+                st.code(gemini_text)
+
+        if prediction_branch:
+            st.header("🟠 Prediction + Reality — separate branch")
+            st.warning("This branch is NOT merged into the realistic image. AI predictions may be wrong and must not be treated as authentic ridge detail.")
+            with st.spinner("Running independent Qwen/Hugging Face prediction and review…"):
+                ai = run_ai_review_stack(data, uploaded.type or "image/jpeg", encoded.tobytes(), run_prediction=True) if ok else {}
+            pred = ai.get("prediction", {})
+            review = ai.get("review", {})
+            if pred:
+                st.subheader("Qwen Vision prediction/reasoning")
+                st.code(pred.get("text", "No prediction returned."))
+            if review:
+                st.subheader("Hugging Face final review")
+                st.code(review.get("text", "No review returned."))
+            report = json.dumps(ai, indent=2, ensure_ascii=False).encode("utf-8")
+            st.download_button("Download AI review report", report, "fingerprint_ai_review.json", "application/json", use_container_width=True)
+        else:
+            st.caption("Prediction branch is off. The realistic output remains purely local CV processing.")
 else:
     st.info("Upload a photo to begin.")
 
-st.warning("Use only fingerprints you own or are authorized to process. This tool visualizes visible ridge structure and does not identify people, perform fingerprint matching, or bypass biometric authentication.")
+st.warning("Use only fingerprints you own or are authorized to process. This project visualizes visible ridge structure and does not identify people, perform fingerprint matching, or bypass biometric authentication.")
