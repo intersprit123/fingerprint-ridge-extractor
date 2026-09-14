@@ -18,10 +18,10 @@ load_dotenv()
 
 st.set_page_config(page_title="Fingerprint Ridge Extractor", page_icon="🖐️", layout="wide")
 st.title("🖐️ Fingerprint Ridge Extractor")
-st.caption("Four-stage local image-processing pipeline for fingerprints you own or are authorized to process.")
+st.caption("Four-stage, detail-preserving ridge visualization for images you are authorized to process.")
 
 uploaded = st.file_uploader("Upload a fingertip photo", type=["jpg", "jpeg", "png", "webp"])
-mode = st.radio("Processing mode", ["Mode 1 — Realistic", "Mode 2 — Realistic + Precision"], horizontal=True)
+mode = st.radio("Processing mode", ["Mode 1 — Realistic", "Mode 2 — High Precision"], index=1, horizontal=True)
 mode_number = 1 if mode.startswith("Mode 1") else 2
 use_gemini = st.checkbox("Use Gemini for image-quality guidance + automatic zoom recommendation", value=True)
 
@@ -42,12 +42,7 @@ def gemini_quality_guidance(image_bytes: bytes, mime_type: str) -> str:
         {"inline_data": {"mime_type": mime_type, "data": base64.b64encode(image_bytes).decode("ascii")}},
     ]}]}
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers={"Content-Type": "application/json"}, method="POST")
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             result = json.loads(response.read().decode("utf-8"))
@@ -86,7 +81,7 @@ if uploaded:
         st.metric("Local quality", f"{quality['score']:.0f}/100")
         st.write(f"**{quality['label']}** — sharpness {quality['sharpness']:.0f}, contrast {quality['contrast']:.1f}")
 
-    if st.button("Run 4-stage extraction", type="primary", use_container_width=True):
+    if st.button("Run high-quality 4-stage extraction", type="primary", use_container_width=True):
         guidance = None
         if use_gemini:
             try:
@@ -95,7 +90,7 @@ if uploaded:
                 st.warning(f"Gemini guidance unavailable; using local automatic zoom: {exc}")
 
         zoom_scale = recommended_zoom(guidance, image)
-        with st.spinner(f"Running Task 1 → Task 2 → Task 3 → Task 4 automatically at {zoom_scale}x…"):
+        with st.spinner(f"Analyzing → isolating → cleaning → border removal → final representation at {zoom_scale}x…"):
             pipeline = process_pipeline(image_array, mode=mode_number, zoom_scale=zoom_scale)
 
         stage1 = pipeline["stage1"]
@@ -103,40 +98,37 @@ if uploaded:
         stage3 = pipeline["stage3"]
         stage4 = pipeline["stage4"]
         mask = pipeline["mask"]
+        zoomed = pipeline["zoomed"]
         actual_scale = pipeline["zoom_scale"]
-        preview = make_preview(image_array, mask)
 
-        st.success(f"All 4 tasks completed automatically — selected finger processed at {actual_scale}x.")
+        st.success(f"Completed automatically — Task 1 → Task 2 → Task 3 → Task 4 | {actual_scale}x")
 
-        st.header("Pipeline results")
+        st.header("High-quality processing pipeline")
         a, b = st.columns(2)
         with a:
-            st.subheader("Task 1 — Background removed")
+            st.subheader("Task 1 — Clean white background")
             st.image(stage1, use_container_width=True)
-            st.caption("The automatically selected finger is kept; everything outside it is white.")
+            st.caption("One automatically selected finger is isolated; everything else is white.")
         with b:
-            st.subheader("Task 2 — Extra marks removed")
+            st.subheader("Task 2 — Keep real ridge structure")
             st.image(stage2, use_container_width=True)
-            st.caption("Only ridge-like line evidence inside the selected finger is retained.")
+            st.caption("Local contrast, dark-ridge enhancement and oriented evidence suppress unrelated marks and texture.")
 
         c, d = st.columns(2)
         with c:
-            st.subheader("Task 3 — Finger border removed")
+            st.subheader("Task 3 — Remove finger border")
             st.image(stage3, use_container_width=True)
-            st.caption("The outer silhouette/border is removed using distance from the finger edge.")
+            st.caption("The silhouette is excluded while the interior ridge field is retained.")
         with d:
-            st.subheader("Task 4 — Dark final representation")
+            st.subheader("Task 4 — Final dark representation")
             st.image(stage4, use_container_width=True)
-            st.caption("Clean dark ridge lines on a white background. No synthetic ridge detail is added.")
-            ok, encoded = cv2.imencode(".png", stage4)
-            if ok:
-                st.download_button(
-                    "Download final ridge PNG",
-                    encoded.tobytes(),
-                    "fingerprint_ridges_final.png",
-                    "image/png",
-                    use_container_width=True,
-                )
+            st.caption("Clean dark lines on white, derived from captured image pixels rather than generated biometric detail.")
+
+        st.header("Final result")
+        st.image(stage4, use_container_width=True)
+        ok, encoded = cv2.imencode(".png", stage4)
+        if ok:
+            st.download_button("Download final ridge PNG", encoded.tobytes(), "fingerprint_ridges_final.png", "image/png", use_container_width=True)
 
         d1, d2, d3 = st.columns(3)
         with d1:
@@ -146,8 +138,10 @@ if uploaded:
         with d3:
             st.metric("Automatic zoom", f"{actual_scale}x")
 
-        with st.expander("Original-frame finger isolation"):
-            st.image(preview, use_container_width=True)
+        with st.expander("Show enlarged selected finger"):
+            st.image(zoomed, use_container_width=True)
+        with st.expander("Show original-frame isolation"):
+            st.image(make_preview(image_array, mask), use_container_width=True)
         if guidance:
             with st.expander("Gemini preprocessing guidance"):
                 st.code(guidance)
